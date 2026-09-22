@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>THE EXAMPLE</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #efebe3;
+      color: #2a2a2a;
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: none;
+    }
+    .kicker {
+      position: absolute;
+      top: 7vh;
+      left: 5vw;
+      margin: 0;
+      color: #9a6a2e;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.28em;
+      pointer-events: none;
+    }
+    .caption {
+      position: absolute;
+      left: 5vw;
+      bottom: 7vh;
+      margin: 0;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px;
+      color: #3a3a3a;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <p class="kicker">THE EXAMPLE</p>
+  <canvas id="c"></canvas>
+  <p class="caption">Move the mouse. Near the attractor, gravel. Far from it, the grid comes back.</p>
+  <script>
+    const COLS = 12;
+    const ROWS = 16;
+
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d");
+
+    const cells = [];
+    const attractor = { x: 0, y: 0 };
+    window.attractor = attractor;
+
+    let grid = { step: 28, size: 26, influence: 280 };
+
+    function rand(col, row, salt) {
+      const n = Math.sin(col * 12.9898 + row * 78.233 + salt * 37.719) * 43758.5453;
+      return n - Math.floor(n);
+    }
+
+    function layout() {
+      const dpr = window.devicePixelRatio || 1;
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      const step = Math.min(width * 0.38 / COLS, height * 0.62 / ROWS);
+      const size = step * 0.98;
+      const gridW = (COLS - 1) * step;
+      const gridH = (ROWS - 1) * step;
+      const originX = width * 0.42;
+      const originY = (height - gridH) / 2;
+
+      grid = {
+        step,
+        size,
+        influence: Math.max(gridW, gridH) * 0.85,
+      };
+
+      cells.length = 0;
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          cells.push({
+            homeX: originX + col * step,
+            homeY: originY + row * step,
+            angle: (rand(col, row, 1) - 0.5) * Math.PI,
+            jx: (rand(col, row, 2) - 0.5) * step * 0.95,
+            jy: (rand(col, row, 3) - 0.5) * step * 0.95,
+          });
+        }
+      }
+
+      if (!window._ready) {
+        attractor.x = originX + gridW + step * 1.35;
+        attractor.y = originY + gridH * 0.48;
+        window._ready = true;
+      }
+
+      window._w = width;
+      window._h = height;
+    }
+
+    function pointerPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+
+    window.addEventListener("pointermove", (e) => {
+      const p = pointerPos(e);
+      attractor.x = p.x;
+      attractor.y = p.y;
+    });
+
+    function falloff(dist, radius) {
+      if (dist >= radius) return 0;
+      const t = 1 - dist / radius;
+      return t * t * (3 - 2 * t);
+    }
+
+    function draw() {
+      const w = window._w;
+      const h = window._h;
+      ctx.fillStyle = "#efebe3";
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.strokeStyle = "#1c1c1c";
+      ctx.lineWidth = 1.15;
+      ctx.lineJoin = "miter";
+
+      for (const cell of cells) {
+        const dist = Math.hypot(attractor.x - cell.homeX, attractor.y - cell.homeY);
+        const t = falloff(dist, grid.influence);
+        const x = cell.homeX + cell.jx * t;
+        const y = cell.homeY + cell.jy * t;
+        const a = cell.angle * t;
+        const s = grid.size;
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(a);
+        ctx.strokeRect(-s / 2, -s / 2, s, s);
+        ctx.restore();
+      }
+
+      ctx.fillStyle = "#3b82f6";
+      ctx.beginPath();
+      ctx.arc(attractor.x, attractor.y, 6.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#3b82f6";
+      ctx.font = "500 13px Helvetica, Arial, sans-serif";
+      ctx.textBaseline = "middle";
+      ctx.fillText("att", attractor.x + 12, attractor.y - 1);
+
+      requestAnimationFrame(draw);
+    }
+
+    window.addEventListener("resize", layout);
+    layout();
+    draw();
+  </script>
+</body>
+</html>

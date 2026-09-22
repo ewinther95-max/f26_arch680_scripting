@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>West Village — NS wind field</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #1a1814; color: #ece6d8; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #ui {
+      position: absolute; left: 12px; right: 12px; bottom: 10px; z-index: 5;
+      display: grid; grid-template-columns: 0.95fr 1.05fr 1.05fr 1.05fr; gap: 8px 16px;
+      font-family: Helvetica, Arial, sans-serif; font-size: 11px;
+      background: rgba(22,20,17,0.82); border: 1px solid #3a3530;
+      padding: 10px 14px; line-height: 1.4; color: #e8e0d2;
+    }
+    #ui h1 { font-family: Times, serif; font-size: 13px; letter-spacing: 0.16em; margin: 0 0 2px; }
+    #ui .sub { font-style: italic; color: #9a9184; margin-bottom: 8px; font-size: 10px; }
+    #ui h2 { font-size: 10px; letter-spacing: 0.14em; color: #e8a07a; margin: 8px 0 4px; }
+    #ui .col h1, #ui .col h2 { margin-top: 0; }
+    #ui label { display: flex; gap: 8px; margin: 2px 0; cursor: pointer; }
+    #ui input[type="range"] { width: 100%; }
+    #ui .hint { color: #8f877c; font-size: 10px; margin: 2px 0 4px; }
+    button { font: 11px Helvetica, sans-serif; background: #2a2622; color: #eee; border: 1px solid #555; padding: 4px 8px; cursor: pointer; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <aside id="ui">
+    <div class="col">
+      <h1>WEST VILLAGE</h1>
+      <div class="sub">Navier–Stokes wind · swirls &amp; gullies</div>
+      <h2>ATTRACTOR</h2>
+      <label><input type="radio" name="src" value="civic" checked> Civic facilities</label>
+      <label><input type="radio" name="src" value="all"> All buildings</label>
+      <label><input type="radio" name="src" value="mouse"> Mouse vortex</label>
+      <button id="reset">Reset facilities</button>
+    </div>
+    <div class="col">
+      <h2>FLUID</h2>
+      <label><input type="checkbox" id="wind" checked> Wind forcing</label>
+      <label><input type="radio" name="wmode" value="fast"> Fast sweep</label>
+      <label><input type="radio" name="wmode" value="channel" checked> Channel between buildings</label>
+      <label><input type="checkbox" id="vort" checked> Swirls (vorticity)</label>
+      <label><input type="checkbox" id="trails" checked> Tracer trails</label>
+      <div class="hint">Wind <span id="wndv">1.2</span> · Swirl <span id="swv">1.0</span> · Random <span id="rdv">0.8</span></div>
+      <input type="range" id="windAmt" min="0" max="24" value="12">
+      <input type="range" id="swirl" min="0" max="24" value="10">
+      <input type="range" id="rand" min="0" max="20" value="8">
+    </div>
+    <div class="col">
+      <h2>PARTICLES</h2>
+      <label><input type="radio" name="bound" value="contain" checked> Contain (site walls)</label>
+      <label><input type="radio" name="bound" value="free"> Unleash (leave the site)</label>
+      <div class="hint">Contained: perimeter redirects. Unleashed: tracers leave the block.</div>
+    </div>
+    <div class="col">
+      <h2>GULLIES / ROADS</h2>
+      <label><input type="checkbox" id="rPromenade" checked> River promenade</label>
+      <label><input type="checkbox" id="rRail" checked> Rail collector</label>
+      <label><input type="checkbox" id="rSpine"> 14 Street spine</label>
+      <label><input type="checkbox" id="rLoop"> Perimeter loop</label>
+      <label><input type="checkbox" id="rCross"> Mid-site cross</label>
+      <label><input type="checkbox" id="rBow"> Bow Trail through</label>
+    </div>
+  </aside>
+  <canvas id="c"></canvas>
+  <script>
+    const GW = 160, GH = 48, N = 3200;
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    function $(id) { return document.getElementById(id); }
+    const ui = {
+      src: () => document.querySelector("input[name=src]:checked").value,
+      wind: () => $("wind").checked,
+      windMode: () => document.querySelector("input[name=wmode]:checked").value,
+      contain: () => document.querySelector("input[name=bound]:checked").value === "contain",
+      vort: () => $("vort").checked,
+      trails: () => $("trails").checked,
+      windAmt: () => +$("windAmt").value / 10,
+      swirl: () => +$("swirl").value / 10,
+      rand: () => +$("rand").value / 10,
+      roads: () => ({
+        promenade: $("rPromenade").checked, rail: $("rRail").checked,
+        spine: $("rSpine").checked, loop: $("rLoop").checked,
+        cross: $("rCross").checked, bow: $("rBow").checked,
+      }),
+    };
+
+    const u = new Float32Array(GW * GH);
+    const v = new Float32Array(GW * GH);
+    const u0 = new Float32Array(GW * GH);
+    const v0 = new Float32Array(GW * GH);
+    const p = new Float32Array(GW * GH);
+    const div = new Float32Array(GW * GH);
+    const curl = new Float32Array(GW * GH);
+    const solid = new Uint8Array(GW * GH);
+    const gully = new Float32Array(GW * GH);
+    const gux = new Float32Array(GW * GH);
+    const guy = new Float32Array(GW * GH);
+
+    let data, view, homes = [], particles, mouse = { x: 0, y: 0 }, dragging = null;
+    let lastT = performance.now(), t0 = lastT, trees = [];
+
+    const IX = (i, j) => j * GW + i;
+
+    function lerp(a, b, t) { return a + (b - a) * t; }
+    function hash(x, y, s) {
+      const n = Math.sin(x * 12.9898 + y * 78.233 + s * 37.719) * 43758.5453;
+      return n - Math.floor(n);
+    }
+    function inside(x, y, poly) {
+      let odd = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi) odd = !odd;
+      }
+      return odd;
+    }
+    function bounds(pts) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const [x, y] of pts) {
+        if (x < minX) minX = x; if (y < minY) minY = y;
+        if (x > maxX) maxX = x; if (y > maxY) maxY = y;
+      }
+      return { minX, minY, maxX, maxY };
+    }
+    function worldToCell(x, y) {
+      const i = (x - view.minX) / (view.maxX - view.minX) * (GW - 1);
+      const j = (y - view.minY) / (view.maxY - view.minY) * (GH - 1);
+      return { i, j };
+    }
+    function sample(arr, x, y) {
+      const { i, j } = worldToCell(x, y);
+      const i0 = Math.max(0, Math.min(GW - 2, i | 0));
+      const j0 = Math.max(0, Math.min(GH - 2, j | 0));
+      const fi = i - i0, fj = j - j0;
+      const a = arr[IX(i0, j0)], b = arr[IX(i0 + 1, j0)], c = arr[IX(i0, j0 + 1)], d = arr[IX(i0 + 1, j0 + 1)];
+      return lerp(lerp(a, b, fi), lerp(c, d, fi), fj);
+    }
+
+    function sources() {
+      const m = ui.src();
+      if (m === "mouse") return [{ x: mouse.x, y: mouse.y, role: "mouse" }];
+      if (m === "civic") return homes.filter((h) => h.role !== "other");
+      return homes;
+    }
+
+    function roadLines() {
+      const b = bounds(data.site), on = ui.roads(), lines = [], south = [], north = [];
+      for (let x = b.minX; x <= b.maxX; x += 40) {
+        const ys = data.site.filter((p) => Math.abs(p[0] - x) < 30).map((p) => p[1]);
+        if (!ys.length) continue;
+        south.push([x, Math.min(...ys) + 24]);
+        north.push([x, Math.max(...ys) - 24]);
+      }
+      if (on.promenade && north.length > 1) lines.push(north);
+      if (on.rail && south.length > 1) lines.push(south);
+      if (on.spine) lines.push([[368, b.minY + 16], [368, b.maxY - 16]]);
+      if (on.cross) lines.push([[b.minX + 20, (b.minY + b.maxY) / 2], [b.maxX - 20, (b.minY + b.maxY) / 2]]);
+      if (on.loop && north.length) {
+        lines.push([[b.minX + 28, south[0][1]], [b.minX + 28, north[0][1]]]);
+        lines.push([[b.maxX - 28, south[south.length - 1][1]], [b.maxX - 28, north[north.length - 1][1]]]);
+        lines.push(north, south);
+      }
+      if (on.bow) lines.push([[b.minX + 70, (b.minY + b.maxY) / 2 - 20], [b.maxX - 70, (b.minY + b.maxY) / 2 + 8]]);
+      return lines;
+    }
+
+    function stampMask() {
+      solid.fill(0);
+      gully.fill(0); gux.fill(0); guy.fill(0);
+      for (let i = 0; i < GW; i++) {
+        solid[IX(i, 0)] = 1;
+        solid[IX(i, GH - 1)] = 1;
+      }
+      for (let j = 0; j < GH; j++) {
+        solid[IX(0, j)] = 1;
+        solid[IX(GW - 1, j)] = 1;
+      }
+      const wallSite = ui.contain();
+      if (wallSite) {
+        for (let j = 1; j < GH - 1; j++) {
+          for (let i = 1; i < GW - 1; i++) {
+            const x = lerp(view.minX, view.maxX, i / (GW - 1));
+            const y = lerp(view.minY, view.maxY, j / (GH - 1));
+            if (!inside(x, y, data.site)) solid[IX(i, j)] = 1;
+          }
+        }
+      }
+      for (const b of homes) {
+        if (!b.pts || b.pts.length < 3) continue;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const [x, y] of b.pts) {
+          if (x < minX) minX = x; if (y < minY) minY = y;
+          if (x > maxX) maxX = x; if (y > maxY) maxY = y;
+        }
+        const a = worldToCell(minX, minY), c = worldToCell(maxX, maxY);
+        const i0 = Math.max(1, Math.min(a.i, c.i) | 0);
+        const i1 = Math.min(GW - 2, (Math.max(a.i, c.i) | 0) + 1);
+        const j0 = Math.max(1, Math.min(a.j, c.j) | 0);
+        const j1 = Math.min(GH - 2, (Math.max(a.j, c.j) | 0) + 1);
+        for (let j = j0; j <= j1; j++) {
+          for (let i = i0; i <= i1; i++) {
+            const x = lerp(view.minX, view.maxX, i / (GW - 1));
+            const y = lerp(view.minY, view.maxY, j / (GH - 1));
+            if (inside(x, y, b.pts)) solid[IX(i, j)] = 2;
+          }
+        }
+      }
+      const next = Uint8Array.from(solid);
+      for (let j = 1; j < GH - 1; j++) {
+        for (let i = 1; i < GW - 1; i++) {
+          if (solid[IX(i, j)] !== 0) continue;
+          if (solid[IX(i - 1, j)] === 2 || solid[IX(i + 1, j)] === 2 || solid[IX(i, j - 1)] === 2 || solid[IX(i, j + 1)] === 2) {
+            next[IX(i, j)] = 2;
+          }
+        }
+      }
+      for (let n = 0; n < next.length; n++) solid[n] = next[n] ? 1 : 0;
+      const lines = roadLines();
+      for (const ln of lines) {
+        for (let k = 1; k < ln.length; k++) {
+          const ax = ln[k - 1][0], ay = ln[k - 1][1], bx = ln[k][0], by = ln[k][1];
+          const len = Math.hypot(bx - ax, by - ay) || 1;
+          const tx = (bx - ax) / len, ty = (by - ay) / len;
+          const steps = Math.max(2, len / 8 | 0);
+          for (let s = 0; s <= steps; s++) {
+            const x = lerp(ax, bx, s / steps), y = lerp(ay, by, s / steps);
+            const { i, j } = worldToCell(x, y);
+            for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+              const ii = (i | 0) + di, jj = (j | 0) + dj;
+              if (ii < 1 || jj < 1 || ii >= GW - 1 || jj >= GH - 1) continue;
+              const id = IX(ii, jj);
+              gully[id] = 1;
+              gux[id] = tx; guy[id] = ty;
+            }
+          }
+        }
+      }
+    }
+
+    function addForces(dt, time) {
+      const w = ui.wind() ? ui.windAmt() : 0;
+      const r = ui.rand();
+      for (let j = 1; j < GH - 1; j++) {
+        for (let i = 1; i < GW - 1; i++) {
+          const id = IX(i, j);
+          if (solid[id]) { u[id] = v[id] = 0; continue; }
+          const x = lerp(view.minX, view.maxX, i / (GW - 1));
+          const y = lerp(view.minY, view.maxY, j / (GH - 1));
+          const gust = 0.75 + 0.25 * Math.sin(time * 1.6 + y * 0.012);
+          if (ui.windMode() === "fast") {
+            u[id] += w * 22 * gust * dt;
+            v[id] += w * 3.2 * Math.sin(time * 1.3 + y * 0.02) * dt;
+          } else if (i < 8) {
+            u[id] += w * 55 * gust * dt;
+            v[id] += w * 6 * Math.sin(time * 1.3 + y * 0.02) * dt;
+          }
+          if (ui.windMode() === "channel") {
+            const alleyV = solid[IX(i - 1, j)] && solid[IX(i + 1, j)];
+            const alleyH = solid[IX(i, j - 1)] && solid[IX(i, j + 1)];
+            const squeeze = (solid[IX(i - 1, j)] || solid[IX(i + 1, j)]) && (solid[IX(i, j - 1)] || solid[IX(i, j + 1)]);
+            if (alleyV) v[id] += (v[id] >= 0 ? 1 : -1) * w * 36 * dt;
+            if (alleyH) u[id] += (u[id] >= 0 ? 1 : -1) * w * 48 * dt;
+            if (squeeze) {
+              u[id] *= 1.04;
+              v[id] *= 1.04;
+            }
+          }
+          if (gully[id]) {
+            u[id] += gux[id] * w * 38 * dt;
+            v[id] += guy[id] * w * 38 * dt;
+          }
+          if (r > 0 && hash(i, j, (time * 4) | 0) > 0.988) {
+            u[id] += (hash(i, 1, time) - 0.5) * r * 70 * dt;
+            v[id] += (hash(j, 2, time) - 0.5) * r * 70 * dt;
+          }
+        }
+      }
+      for (const a of sources()) {
+        const { i, j } = worldToCell(a.x, a.y);
+        const ii = i | 0, jj = j | 0;
+        const rad = a.role === "mouse" ? 6 : 5;
+        const spin = (a.role === "mouse" ? 1.6 : 0.9) * ui.swirl() * 70 * dt;
+        for (let dj = -rad; dj <= rad; dj++) {
+          for (let di = -rad; di <= rad; di++) {
+            const x = ii + di, y = jj + dj;
+            if (x < 1 || y < 1 || x >= GW - 1 || y >= GH - 1) continue;
+            const d2 = di * di + dj * dj;
+            if (d2 < 2 || d2 > rad * rad || solid[IX(x, y)]) continue;
+            u[IX(x, y)] += -dj * spin / (d2 + 1);
+            v[IX(x, y)] += di * spin / (d2 + 1);
+          }
+        }
+      }
+    }
+
+    function walls() {
+      for (let j = 1; j < GH - 1; j++) {
+        for (let i = 1; i < GW - 1; i++) {
+          const id = IX(i, j);
+          if (solid[id]) { u[id] = v[id] = 0; continue; }
+          if (solid[IX(i + 1, j)]) u[id] = Math.min(0, u[id]);
+          if (solid[IX(i - 1, j)]) u[id] = Math.max(0, u[id]);
+          if (solid[IX(i, j + 1)]) v[id] = Math.min(0, v[id]);
+          if (solid[IX(i, j - 1)]) v[id] = Math.max(0, v[id]);
+        }
+      }
+    }
+
+    function vorticity(dt) {
+      if (!ui.vort()) return;
+      const eps = ui.swirl() * 18 * dt;
+      for (let j = 1; j < GH - 1; j++) {
+        for (let i = 1; i < GW - 1; i++) {
+          curl[IX(i, j)] = (v[IX(i + 1, j)] - v[IX(i - 1, j)] - (u[IX(i, j + 1)] - u[IX(i, j - 1)])) * 0.5;
+        }
+      }
+      for (let j = 1; j < GH - 1; j++) {
+        for (let i = 1; i < GW - 1; i++) {
+          const id = IX(i, j);
+          if (solid[id]) continue;
+          const dwdx = (Math.abs(curl[IX(i + 1, j)]) - Math.abs(curl[IX(i - 1, j)])) * 0.5;
+          const dwdy = (Math.abs(curl[IX(i, j + 1)]) - Math.abs(curl[IX(i, j - 1)])) * 0.5;
+          const mag = Math.hypot(dwdx, dwdy) + 1e-5;
+          u[id] += eps * (dwdy / mag) * curl[id];
+          v[id] += eps * -(dwdx / mag) * curl[id];
+        }
+      }
+    }
+
+    function advect(srcU, srcV, dstU, dstV, dt) {
+      const dt0x = dt * (GW - 2) * 0.35;
+      const dt0y = dt * (GH - 2) * 0.35;
+      const vel = (arr, ii, jj) => (solid[IX(ii, jj)] ? 0 : arr[IX(ii, jj)]);
+      for (let j = 1; j < GH - 1; j++) {
+        for (let i = 1; i < GW - 1; i++) {
+          const id = IX(i, j);
+          if (solid[id]) { dstU[id] = dstV[id] = 0; continue; }
+          let x = i - dt0x * srcU[id];
+          let y = j - dt0y * srcV[id];
+          if (x < 0.5) x = 0.5; if (x > GW - 1.5) x = GW - 1.5;
+          if (y < 0.5) y = 0.5; if (y > GH - 1.5) y = GH - 1.5;
+          const i0 = x | 0, j0 = y | 0, i1 = i0 + 1, j1 = j0 + 1;
+          const s1 = x - i0, t1 = y - j0, s0 = 1 - s1, t0 = 1 - t1;
+          dstU[id] = s0 * (t0 * vel(srcU, i0, j0) + t1 * vel(srcU, i0, j1)) + s1 * (t0 * vel(srcU, i1, j0) + t1 * vel(srcU, i1, j1));
+          dstV[id] = s0 * (t0 * vel(srcV, i0, j0) + t1 * vel(srcV, i0, j1)) + s1 * (t0 * vel(srcV, i1, j0) + t1 * vel(srcV, i1, j1));
+        }
+      }
+    }
+
+    function project() {
+      for (let j = 1; j < GH - 1; j++) {
+        for (let i = 1; i < GW - 1; i++) {
+          div[IX(i, j)] = solid[IX(i, j)] ? 0 : -0.5 * (u[IX(i + 1, j)] - u[IX(i - 1, j)] + v[IX(i, j + 1)] - v[IX(i, j - 1)]);
+          p[IX(i, j)] = 0;
+        }
+      }
+      for (let k = 0; k < 12; k++) {
+        for (let j = 1; j < GH - 1; j++) {
+          for (let i = 1; i < GW - 1; i++) {
+            if (solid[IX(i, j)]) continue;
+            p[IX(i, j)] = (div[IX(i, j)] + p[IX(i - 1, j)] + p[IX(i + 1, j)] + p[IX(i, j - 1)] + p[IX(i, j + 1)]) * 0.25;
+          }
+        }
+      }
+      for (let j = 1; j < GH - 1; j++) {
+        for (let i = 1; i < GW - 1; i++) {
+          if (solid[IX(i, j)]) { u[IX(i, j)] = v[IX(i, j)] = 0; continue; }
+          u[IX(i, j)] -= 0.5 * (p[IX(i + 1, j)] - p[IX(i - 1, j)]);
+          v[IX(i, j)] -= 0.5 * (p[IX(i, j + 1)] - p[IX(i, j - 1)]);
+        }
+      }
+    }
+
+    function damp() {
+      for (let n = 0; n < u.length; n++) {
+        if (solid[n]) { u[n] = v[n] = 0; continue; }
+        u[n] *= 0.992; v[n] *= 0.992;
+      }
+    }
+
+    function stepFluid(dt, time) {
+      addForces(dt, time);
+      walls();
+      vorticity(dt);
+      u0.set(u); v0.set(v);
+      advect(u0, v0, u, v, dt);
+      walls();
+      project();
+      walls();
+      damp();
+    }
+
+    function color(speed, vor) {
+      const s = Math.min(1, speed * 0.12);
+      const w = Math.max(-1, Math.min(1, vor * 0.35));
+      let r, g, b;
+      if (w > 0) {
+        r = lerp(40, 255, w);
+        g = lerp(180, 70, w);
+        b = lerp(200, 90, w);
+      } else {
+        r = lerp(40, 80, -w);
+        g = lerp(180, 255, -w);
+        b = lerp(200, 70, -w);
+      }
+      r = lerp(r, 255, s * 0.55);
+      g = lerp(g, 230, s * 0.25);
+      b = lerp(b, 140, s * 0.15);
+      return [r | 0, g | 0, b | 0, 0.22 + s * 0.65];
+    }
+
+    function layout() {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const w = window.innerWidth, h = window.innerHeight;
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (!data) return;
+      const b = bounds(data.site);
+      const usableW = w - 40, usableH = h - 210;
+      const scale = Math.min(usableW / (b.maxX - b.minX + 160), usableH / (b.maxY - b.minY + 200));
+      view = {
+        w, h, scale,
+        minX: b.minX - 70, maxX: b.maxX + 70, minY: b.minY - 80, maxY: b.maxY + 100,
+        ox: (w - (b.maxX - b.minX + 140) * scale) / 2,
+        oy: 48 + (usableH - (b.maxY - b.minY + 180) * scale) / 2,
+      };
+      if (!homes.length) {
+        homes = data.buildings.map((bldg) => ({ x: bldg.cx, y: bldg.cy, role: bldg.role, name: bldg.name, pts: bldg.pts }));
+      }
+      stampMask();
+      if (!particles) {
+        particles = [];
+        const bb = bounds(data.site);
+        let n = 0, g = 0;
+        while (n < N && g < N * 30) {
+          g++;
+          const x = bb.minX + Math.random() * (bb.maxX - bb.minX);
+          const y = bb.minY + Math.random() * (bb.maxY - bb.minY);
+          if (!inside(x, y, data.site)) continue;
+          particles.push({ x, y, hx: [x, x, x, x, x, x], hy: [y, y, y, y, y, y] });
+          n++;
+        }
+        for (let k = 0; k < 140; k++) {
+          trees.push({ x: bb.minX + hash(k, 2, 1) * (bb.maxX - bb.minX), y: bb.maxY + 20 + hash(k, 3, 2) * 65, r: 3 + hash(k, 4, 1) * 6 });
+        }
+      }
+      if (!mouse.x) { mouse.x = (b.minX + b.maxX) / 2; mouse.y = (b.minY + b.maxY) / 2; }
+    }
+
+    function S(x, y) {
+      return { x: view.ox + (x - view.minX) * view.scale, y: view.oy + (view.maxY - y) * view.scale };
+    }
+    function WW(sx, sy) {
+      return { x: view.minX + (sx - view.ox) / view.scale, y: view.maxY - (sy - view.oy) / view.scale };
+    }
+    function ring(pts, fill, stroke) {
+      if (!pts || pts.length < 3) return;
+      ctx.beginPath();
+      pts.forEach((p, i) => { const s = S(p[0], p[1]); i ? ctx.lineTo(s.x, s.y) : ctx.moveTo(s.x, s.y); });
+      ctx.closePath();
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+    }
+    function polyline(lines, stroke, width) {
+      ctx.strokeStyle = stroke; ctx.lineWidth = width; ctx.lineCap = "round";
+      for (const ln of lines) {
+        if (!ln || ln.length < 2) continue;
+        ctx.beginPath();
+        ln.forEach((p, i) => { const s = S(p[0], p[1]); i ? ctx.lineTo(s.x, s.y) : ctx.moveTo(s.x, s.y); });
+        ctx.stroke();
+      }
+    }
+
+    function pointer(e) {
+      const r = canvas.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+    canvas.addEventListener("pointermove", (e) => {
+      const wpt = WW(pointer(e).x, pointer(e).y);
+      if (ui.src() === "mouse") mouse = wpt;
+      if (dragging) { dragging.x = wpt.x; dragging.y = wpt.y; stampMask(); }
+    });
+    canvas.addEventListener("pointerdown", (e) => {
+      if (ui.src() === "mouse") return;
+      const p = pointer(e);
+      for (const a of sources()) {
+        const s = S(a.x, a.y);
+        if (Math.hypot(p.x - s.x, p.y - s.y) < 14) dragging = a;
+      }
+    });
+    canvas.addEventListener("pointerup", () => { dragging = null; });
+    $("reset").onclick = () => {
+      const orig = new Map(data.buildings.map((b) => [b.name + b.role, b]));
+      for (const h of homes) {
+        const o = orig.get(h.name + h.role);
+        if (o) { h.x = o.cx; h.y = o.cy; }
+      }
+      stampMask();
+    };
+    $("windAmt").oninput = () => { $("wndv").textContent = ui.windAmt().toFixed(1); };
+    $("swirl").oninput = () => { $("swv").textContent = ui.swirl().toFixed(1); };
+    $("rand").oninput = () => { $("rdv").textContent = ui.rand().toFixed(1); };
+    ["rPromenade", "rRail", "rSpine", "rLoop", "rCross", "rBow"].forEach((id) => {
+      $(id).onchange = stampMask;
+    });
+    document.querySelectorAll("input[name=bound]").forEach((el) => {
+      el.onchange = () => {
+        stampMask();
+        if (!particles) return;
+        if (!ui.contain()) return;
+        const bb2 = bounds(data.site);
+        for (const pt of particles) {
+          if (inside(pt.x, pt.y, data.site)) continue;
+          let rx, ry, t = 0;
+          do {
+            rx = bb2.minX + Math.random() * (bb2.maxX - bb2.minX);
+            ry = bb2.minY + Math.random() * (bb2.maxY - bb2.minY);
+          } while (!inside(rx, ry, data.site) && t++ < 12);
+          pt.x = rx; pt.y = ry;
+          pt.hx.fill(rx); pt.hy.fill(ry);
+        }
+      };
+    });
+
+    function draw() {
+      if (!view) { requestAnimationFrame(draw); return; }
+      const now = performance.now();
+      const dt = Math.min(0.033, (now - lastT) / 1000);
+      lastT = now;
+      const time = (now - t0) / 1000;
+      const { w, h } = view;
+      ctx.fillStyle = "#1a1814";
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#f0eadc";
+      ctx.font = "500 15px Times, serif";
+      ctx.fillText("VISIBLE  /  INVISIBLE", w / 2, 22);
+      ctx.font = "italic 12px Times, serif";
+      ctx.fillStyle = "#9a9184";
+      ctx.fillText("West Village  ·  incompressible wind  ·  swirls at civic masses, gullies in corridors", w / 2, 40);
+
+      stepFluid(dt, time);
+
+      const bb = bounds(data.site);
+      ctx.beginPath();
+      const r0 = S(bb.minX - 90, bb.maxY + 110), r1 = S(bb.maxX + 90, bb.maxY - 4);
+      ctx.moveTo(r0.x, r0.y);
+      ctx.bezierCurveTo(S(bb.minX + 200, bb.maxY + 40).x, S(bb.minX, bb.maxY + 40).y, S(bb.maxX - 100, bb.maxY + 80).x, S(0, bb.maxY + 80).y, r1.x, r1.y);
+      ctx.lineTo(S(bb.maxX + 90, bb.maxY + 8).x, S(0, bb.maxY + 8).y);
+      ctx.bezierCurveTo(S(bb.maxX * 0.5, bb.maxY + 2).x, S(0, bb.maxY + 2).y, S(bb.minX, bb.maxY + 8).x, S(0, bb.maxY + 8).y, S(bb.minX - 90, bb.maxY + 18).x, S(0, bb.maxY + 18).y);
+      ctx.closePath();
+      ctx.fillStyle = "#2d4450";
+      ctx.fill();
+
+      for (const tr of trees) {
+        const p = S(tr.x, tr.y);
+        ctx.fillStyle = "rgba(70,120,90,0.35)";
+        ctx.beginPath(); ctx.arc(p.x, p.y, tr.r * view.scale * 0.32, 0, Math.PI * 2); ctx.fill();
+      }
+      polyline(data.rail, "rgba(180,170,150,0.35)", 2);
+      polyline(data.roads.crowchild, "rgba(90,80,70,0.5)", 6);
+      ring(data.site, "rgba(255,245,220,0.03)", "rgba(230,220,200,0.35)");
+      polyline(roadLines(), "rgba(255,200,120,0.28)", 3.5);
+
+      ctx.lineCap = "round";
+      for (const pt of particles) {
+        const k = ui.windMode() === "fast" ? 52 : 36;
+        const uu = sample(u, pt.x, pt.y), vv = sample(v, pt.x, pt.y);
+        const cr = sample(curl, pt.x, pt.y);
+        const nx = pt.x + uu * dt * k;
+        const ny = pt.y + vv * dt * k;
+        const inView = (x, y) => x > view.minX && x < view.maxX && y > view.minY && y < view.maxY;
+        const hit = (x, y) => {
+          const ci = Math.max(0, Math.min(GW - 1, worldToCell(x, y).i | 0));
+          const cj = Math.max(0, Math.min(GH - 1, worldToCell(x, y).j | 0));
+          if (solid[IX(ci, cj)]) return true;
+          return ui.contain() && !inside(x, y, data.site);
+        };
+        if (ui.contain()) {
+          if (!hit(nx, ny)) { pt.x = nx; pt.y = ny; }
+          else if (!hit(nx, pt.y)) { pt.x = nx; }
+          else if (!hit(pt.x, ny)) { pt.y = ny; }
+        } else if (!inView(nx, ny)) {
+          pt.x = view.minX + 12;
+          pt.y = view.minY + Math.random() * (view.maxY - view.minY);
+          pt.hx.fill(pt.x); pt.hy.fill(pt.y);
+        } else if (hit(nx, ny)) {
+          if (!hit(nx, pt.y)) { pt.x = nx; }
+          else if (!hit(pt.x, ny)) { pt.y = ny; }
+        } else {
+          pt.x = nx; pt.y = ny;
+        }
+        for (let h = 0; h < 5; h++) { pt.hx[h] = pt.hx[h + 1]; pt.hy[h] = pt.hy[h + 1]; }
+        pt.hx[5] = pt.x; pt.hy[5] = pt.y;
+        const speed = Math.hypot(uu, vv);
+        const [R, G, B, A] = color(speed, cr);
+        if (ui.trails()) {
+          ctx.strokeStyle = `rgba(${R},${G},${B},${A})`;
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          for (let h = 0; h < 6; h++) {
+            const s = S(pt.hx[h], pt.hy[h]);
+            h ? ctx.lineTo(s.x, s.y) : ctx.moveTo(s.x, s.y);
+          }
+          ctx.stroke();
+        } else {
+          const bpt = S(pt.x, pt.y);
+          ctx.fillStyle = `rgba(${R},${G},${B},${A})`;
+          ctx.fillRect(bpt.x, bpt.y, 1.4, 1.4);
+        }
+      }
+
+      for (const bld of homes) ring(bld.pts, "rgba(20,12,10,0.55)", "rgba(255,170,140,0.55)");
+      for (const a of sources()) {
+        const p = S(a.x, a.y);
+        ctx.fillStyle = a.role === "mouse" ? "#6ecbff" : "#ff7a5c";
+        ctx.beginPath(); ctx.arc(p.x, p.y, 4.2, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = "#ffb09a";
+      ctx.font = "11px Helvetica, Arial, sans-serif";
+      for (const [role, text] of [["pumphouse", "Pumphouse Theatre"], ["contemporary", "Contemporary Calgary"], ["armoury", "Mewata Armoury"]]) {
+        const a = homes.find((h) => h.role === role);
+        if (!a) continue;
+        const p = S(a.x, a.y);
+        ctx.textAlign = "right";
+        ctx.fillText(text, p.x - 8, p.y - 8);
+      }
+      ctx.fillStyle = "#8aa";
+      ctx.font = "10px Helvetica, Arial, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("BOW RIVER", S((bb.minX + bb.maxX) / 2, bb.maxY + 48).x, S(0, bb.maxY + 48).y);
+
+      requestAnimationFrame(draw);
+    }
+
+    window.addEventListener("resize", layout);
+    fetch("westvillage.json").then((r) => r.json()).then((j) => { data = j; layout(); draw(); });
+  </script>
+</body>
+</html>
