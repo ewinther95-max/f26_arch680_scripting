@@ -1,0 +1,15 @@
+export const PALETTE = {
+  wood: "#a86c43",
+  timber: "#7d5138",
+  timberDark: "#68432e",
+  mass: "#c4b5a4",
+  joint: "#a89888",
+  ceramic: "#f4fffc",
+  ground: "#e7e1d4",
+  earthWall: "#9a9082",
+  earthFloor: "#8a8174",
+  mouth: "#221e1b",
+  sky: "#d3e0e8",
+  sun: "#fff3e4",
+  fill: "#e4edf2",
+} as const;
